@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+from email.utils import parsedate_to_datetime
+from html.parser import HTMLParser
 
 from bochat_sdk import BochatClient
 
@@ -42,11 +45,15 @@ class DryRunSender:
 
 
 def format_item_message(item: RssItem) -> str:
-    parts = [f"【{item.source_name}】{item.title}"]
-    if item.published_at:
-        parts.append(f"发布时间：{item.published_at}")
+    title = item.title.strip() or "(untitled)"
     if item.link:
-        parts.append(f"链接：{item.link}")
+        parts = [f"### [{title}]({item.link})"]
+    else:
+        parts = [f"### {title}"]
+
+    parts.append(f"**来源**：{item.source_name}")
+    if item.published_at:
+        parts.append(f"**发布时间**：{_format_published_at(item.published_at)}")
     if item.summary:
         summary = _compact_summary(item.summary)
         if summary:
@@ -56,7 +63,96 @@ def format_item_message(item: RssItem) -> str:
 
 
 def _compact_summary(summary: str, max_len: int = 500) -> str:
-    text = " ".join(summary.split())
+    text = " ".join(_strip_html(summary).split())
     if len(text) <= max_len:
         return text
     return f"{text[:max_len - 3]}..."
+
+
+def _format_published_at(value: str) -> str:
+    text = value.strip()
+    parsed = _parse_datetime(text)
+    if parsed is None:
+        return text
+
+    formatted = parsed.strftime("%Y-%m-%d %H:%M")
+    if parsed.tzinfo is None:
+        return formatted
+
+    offset = parsed.utcoffset()
+    if offset is None:
+        return formatted
+    if offset.total_seconds() == 0:
+        return f"{formatted} UTC"
+
+    total_minutes = int(offset.total_seconds() // 60)
+    sign = "+" if total_minutes >= 0 else "-"
+    total_minutes = abs(total_minutes)
+    hours, minutes = divmod(total_minutes, 60)
+    return f"{formatted} UTC{sign}{hours:02d}:{minutes:02d}"
+
+
+def _parse_datetime(value: str) -> datetime | None:
+    normalized = value.removesuffix("Z") + "+00:00" if value.endswith("Z") else value
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        pass
+
+    try:
+        return parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _strip_html(value: str) -> str:
+    parser = _HtmlTextExtractor()
+    parser.feed(value)
+    parser.close()
+    return parser.text()
+
+
+class _HtmlTextExtractor(HTMLParser):
+    _BREAK_TAGS = {
+        "address",
+        "article",
+        "br",
+        "dd",
+        "div",
+        "dt",
+        "figcaption",
+        "footer",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "header",
+        "hr",
+        "li",
+        "main",
+        "p",
+        "section",
+        "td",
+        "th",
+        "tr",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() in self._BREAK_TAGS:
+            self._parts.append(" ")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() in self._BREAK_TAGS:
+            self._parts.append(" ")
+
+    def handle_data(self, data: str) -> None:
+        self._parts.append(data)
+
+    def text(self) -> str:
+        return "".join(self._parts)
